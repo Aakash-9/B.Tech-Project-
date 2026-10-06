@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Model weights — large pretrained checkpoints (hundreds of MB to ~600MB each),
+# auto-downloaded by ultralytics/open_clip on first run. Never belong in git;
+# some of these exceed GitHub's 100MB per-file hard limit outright.
+*.pt
+*.ts
+weights/
+
+# Generated calibration data — specific to one physical camera setup, regenerated
+# by calibrate_homography.py / aruco_workspace.py, not portable between machines.
+homography_matrix.npy
+plane_calib.npz
+
+# Debug/demo renders — reproducible by running the scripts that made them,
+# not source.
+demo_result.png
+sim_frame.png
+sim_occl.png
+arm_preview.png
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>4-DOF Arm — Vision Dashboard</title>
+<style>
+  :root{
+    --bg:#0f1418; --panel:#161d23; --line:#263039; --text:#e6edf3;
+    --dim:#8b9aa7; --accent:#4da3ff; --ok:#3fb950; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.5 "Segoe UI",system-ui,sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);
+         display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600}
+  header .sub{color:var(--dim);font-size:12px}
+  .wrap{padding:16px 20px;display:grid;gap:16px;
+        grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+         overflow:hidden}
+  .panel h2{font-size:12px;margin:0;padding:9px 12px;color:var(--dim);
+            text-transform:uppercase;letter-spacing:.08em;
+            border-bottom:1px solid var(--line);font-weight:600}
+  .panel img{display:block;width:100%;background:#000}
+  .full{grid-column:1/-1}
+  .bar{padding:12px;display:flex;gap:8px;flex-wrap:wrap}
+  input[type=text]{flex:1;min-width:260px;background:#0c1116;color:var(--text);
+        border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:14px}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#04121f;border:0;border-radius:6px;
+         padding:10px 16px;font-weight:600;cursor:pointer;font-size:14px}
+  button.ghost{background:#1d262e;color:var(--text);border:1px solid var(--line)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .chips{padding:0 12px 12px;display:flex;gap:6px;flex-wrap:wrap}
+  .chip{background:#1d262e;border:1px solid var(--line);border-radius:999px;
+        padding:5px 11px;font-size:12px;cursor:pointer;color:var(--dim)}
+  .chip:hover{color:var(--text);border-color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);
+        white-space:nowrap}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;
+     letter-spacing:.06em}
+  tr.held td{background:rgba(63,185,80,.10)}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;
+      margin-right:7px;vertical-align:-1px;border:1px solid #0006}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace}
+  .good{color:var(--ok)} .meh{color:var(--warn)}
+  .tilde{color:var(--warn);cursor:help}
+  #log{margin:0;padding:10px 12px;max-height:190px;overflow:auto;
+       font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--dim)}
+  #log div{padding:2px 0}
+  #log b{color:var(--text);font-weight:500}
+  .note{padding:10px 12px;color:var(--dim);font-size:12px;border-top:1px solid var(--line)}
+  .badge{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+         background:#1d262e;color:var(--dim)}
+  .badge.warn{border-color:var(--warn);color:var(--warn)}
+  .badge.ok{border-color:var(--ok);color:var(--ok)}
+  .toggle{display:inline-flex;border:1px solid var(--line);border-radius:999px;
+          overflow:hidden;margin-left:auto}
+  .seg{background:#1d262e;color:var(--dim);border:0;border-radius:0;padding:6px 14px;
+       font-size:12px;font-weight:600;cursor:pointer}
+  .seg.active{background:var(--accent);color:#04121f}
+  .seg:disabled{opacity:.6;cursor:wait}
+  .errbox{margin:14px 20px 0;padding:11px 14px;border-radius:8px;font-size:13px;
+          background:#3b1d1d;border:1px solid #7c3030;color:#ffb4b4}
+</style>
+</head>
+<body>
+<header>
+  <h1>4-DOF Arm — Vision Dashboard</h1>
+  <span class="sub">camera → measurement → reasoning → inverse kinematics → physics</span>
+  <span class="sub" id="reach"></span>
+  <span class="badge" id="fps">…</span>
+  <span class="badge" id="calib">…</span>
+  <span class="toggle">
+    <button id="btn-sim" class="seg">Simulated scene</button>
+    <button id="btn-cam" class="seg">Live camera</button>
+  </span>
+</header>
+
+<div id="err" class="errbox" style="display:none"></div>
+
+<div class="wrap">
+  <div class="panel">
+    <h2 id="camtitle">Camera view — detected &amp; measured</h2>
+    <img id="camview" src="/video/camera" alt="camera view">
+  </div>
+
+  <div class="panel">
+    <h2>Physics simulation</h2>
+    <img id="simview" src="/video/sim" alt="simulation view">
+  </div>
+
+  <div class="panel full">
+    <h2>Command</h2>
+    <div class="bar">
+      <input type="text" id="cmd" autocomplete="off"
+             placeholder="e.g. pick the biggest blue box">
+      <button id="send">Send</button>
+      <button class="ghost" id="drop">Drop</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="panel full">
+    <h2>Objects on the table — measured vs. true</h2>
+    <table>
+      <thead><tr id="thead"></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="note" id="livenote" style="display:none">
+      This is a real camera, so there is no ground truth to compare against — the
+      confidence column is the detector's own score, not a measure of size accuracy.
+      Sizes are only trustworthy if the calibration badge above is green; a stale
+      calibration produces confident, wrong numbers.
+    </div>
+    <div class="note" id="truthnote">
+      True sizes are known because the scene is simulated — that is what makes the error
+      column meaningful. It reports the <b>worst</b> of the three dimensions, with the
+      offending one in brackets (L, W or H); hover for all three. A
+      <span class="tilde">~</span> before a height means it could not be measured from this
+      camera angle, so an assumed value is shown — and that height is left OUT of the error
+      column, because the gap would measure the assumption, not the vision.
+    </div>
+  </div>
+
+  <div class="panel full">
+    <h2>Activity</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+const EXAMPLES = ["pick the biggest blue box", "pick the smallest blue one",
+                  "pick the red cube", "pick the black cube",
+                  "pick the green book", "pick the yellow cube"];
+
+const $ = id => document.getElementById(id);
+
+const chips = $("chips");
+EXAMPLES.forEach(t => {
+  const b = document.createElement("span");
+  b.className = "chip"; b.textContent = t;
+  b.onclick = () => { $("cmd").value = t; send(); };
+  chips.appendChild(b);
+});
+
+function send(text) {
+  const t = text || $("cmd").value.trim();
+  if (!t) return;
+  fetch("/api/command", {method:"POST", headers:{"Content-Type":"application/json"},
+                         body: JSON.stringify({text:t})});
+  $("cmd").value = "";
+}
+function setSource(kind){
+  fetch("/api/source", {method:"POST", headers:{"Content-Type":"application/json"},
+                        body: JSON.stringify({kind})});
+}
+$("btn-sim").onclick = () => setSource("sim");
+$("btn-cam").onclick = () => setSource("camera");
+
+$("send").onclick = () => send();
+$("drop").onclick = () => send("drop");
+$("cmd").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+
+function swatch(name){
+  const map = {black:"#1c1c1c", white:"#eee", grey:"#808080", red:"#c62828",
+               blue:"#1565c0", green:"#2e7d32", yellow:"#f9d423", orange:"#ef6c00",
+               purple:"#7b1fa2", pink:"#ec93b8", brown:"#6d4c41", cyan:"#00acc1"};
+  return map[name] || "#555";
+}
+
+async function tick(){
+  try{
+    const s = await (await fetch("/api/state")).json();
+    lastState = s;
+    $("reach").textContent = `arm reach ${s.reach[0]}–${s.reach[1]} cm`;
+    const f = s.fps || {};
+    $("fps").textContent =
+      `video ${f.camera} fps · detect ${f.detect} fps · physics ${f.sim} fps`;
+    $("send").disabled = s.busy;
+
+    const live = !!s.is_live;
+    $("btn-sim").className = "seg" + (live ? "" : " active");
+    $("btn-cam").className = "seg" + (live ? " active" : "");
+    $("btn-sim").disabled = $("btn-cam").disabled = !!s.switching;
+    $("camtitle").textContent = (live ? "LIVE camera" : "Simulated camera")
+                              + " — detected & measured";
+    if (s.switching){
+      const box = $("err");
+      box.style.display = "";
+      box.textContent = "Switching source — loading the detector, this takes a few seconds…";
+    }
+    const cal = s.calibration || {};
+    const cb = $("calib");
+    cb.textContent = "calibration: " + (cal.text || "unknown");
+    cb.className = "badge " + (cal.ok ? "ok" : "warn");
+
+    const cols = ["#","Object","Colour","Shape","Measured L×W×H (cm)"]
+      .concat(s.has_truth ? ["True L×W×H (cm)","Worst error"] : ["Confidence"])
+      .concat(["Position (cm)"]);
+    $("thead").innerHTML = cols.map(c => `<th>${c}</th>`).join("");
+    $("truthnote").style.display = s.has_truth ? "" : "none";
+    $("livenote").style.display = s.has_truth ? "none" : "";
+
+    $("rows").innerHTML = s.objects.map(o => {
+      const m = o.measured, t = o.true;
+      const tilde = o.height_measured ? "" : "<span class='tilde' title='assumed, not measured'>~</span>";
+      let extra;
+      if (s.has_truth && t) {
+        const cls = o.err_mm <= 5 ? "good" : "meh";
+        const each = o.err_each || {};
+        const tip = `length ${each.L} mm · width ${each.W} mm · `
+                  + (o.height_measured ? `height ${each.H} mm`
+                                       : `height not measured (assumed)`);
+        extra = `<td class="mono">${t[0]} × ${t[1]} × ${t[2]}</td>
+                 <td class="mono ${cls}" title="${tip}">${o.err_mm} mm
+                     <span style="color:#8b9aa7">(${o.err_dim})</span></td>`;
+      } else {
+        const cc = o.conf >= 0.5 ? "good" : "meh";
+        extra = `<td class="mono ${cc}">${o.conf}</td>`;
+      }
+      return `<tr class="${o.held ? 'held' : ''}">
+        <td class="mono">${o.id ?? "-"}</td>
+        <td>${o.label}${o.held ? " &nbsp;<span class='good'>● held</span>" : ""}</td>
+        <td><span class="sw" style="background:${swatch(o.colour)}"></span>${o.colour ?? "-"}</td>
+        <td>${o.shape}</td>
+        <td class="mono">${m[0]} × ${m[1]} × ${tilde}${m[2]}</td>
+        ${extra}
+        <td class="mono">(${o.pos[0]}, ${o.pos[1]})</td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="8" style="color:#8b9aa7">nothing detected</td></tr>`;
+
+    $("log").innerHTML = s.log.slice().reverse()
+      .map(l => `<div><b>${l.t}</b> &nbsp;${l.text}</div>`).join("");
+    if (!s.switching) $("err").style.display = "none";
+  }catch(e){
+    // Never swallow this silently: a blank, frozen page with no explanation is the worst
+    // possible failure mode to debug.
+    const box = $("err");
+    box.style.display = "";
+    box.textContent = "Dashboard error: " + (e && e.message ? e.message : e)
+                    + "  — is the server still running? (check the terminal)";
+    console.error(e);
+  }
+}
+// Watchdog for a stuck MJPEG panel. A long-lived multipart/x-mixed-replace connection can
+// go quiet in the browser for reasons that never show up server-side — a dropped socket,
+// a throttled background tab, whatever — and the symptom is a frozen or black <img> with a
+// perfectly healthy stream still running underneath it. Rather than chase a cause that may
+// be browser-specific and unreproducible, make the failure mode self-heal: if a panel's
+// `load` event (which MJPEG fires on every new part) hasn't fired in 4 seconds, force a
+// fresh connection. A healthy panel reconnects itself before anyone notices; a permanently
+// broken one would show a visible reconnect happening every few seconds instead of a dead
+// black square with no explanation.
+let lastState = null;
+const lastFrame = {camview: Date.now(), simview: Date.now()};
+["camview", "simview"].forEach(id => {
+  $(id).addEventListener("load", () => { lastFrame[id] = Date.now(); });
+});
+function reviveStalledStreams(){
+  if (lastState && lastState.switching) return;   // an expected pause, not a stall
+  const now = Date.now();
+  if (now - lastFrame.camview > 4000){
+    lastFrame.camview = now;
+    $("camview").src = "/video/camera?r=" + now;
+  }
+  if (now - lastFrame.simview > 4000){
+    lastFrame.simview = now;
+    $("simview").src = "/video/sim?r=" + now;
+  }
+}
+
+tick(); setInterval(tick, 700);
+setInterval(reviveStalledStreams, 1500);
+</script>
+</body>
+</html>
