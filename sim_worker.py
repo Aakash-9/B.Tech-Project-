@@ -38,7 +38,6 @@ SIM_FPS = 15
 # render read as 3D at a glance: without them an object and its label float with no sense
 # of what is resting on what.
 LIGHT_DIR = [0.6, -0.9, 1.2]
-LIFT_CM = 6.0
 
 
 def to_payload(objects):
@@ -137,7 +136,11 @@ def _draw_overlay(img, sim, held, status, mvp, reach_min_cm, reach_max_cm):
 
     entries = []
     for tid, rec in sim.objects.items():
-        anchor = _project(mvp, rec["text_pos"])
+        pos = rec['text_pos']
+        if tid == held:
+            xyz = p.getBasePositionAndOrientation(rec['body'])[0]
+            pos = (xyz[0], xyz[1], xyz[2] + rec['half'][2] + .03)
+        anchor = _project(mvp, pos)
         if anchor is not None:
             entries.append((anchor, rec["label"], tid == held))
 
@@ -168,10 +171,11 @@ def _draw_overlay(img, sim, held, status, mvp, reach_min_cm, reach_max_cm):
 def main(conn):
     from ik_solver import L1, L2
     from pybullet_sim import ArmSim
+    from visual_servo import CONTROL_DT, ServoPick
 
     sim = ArmSim(gui=False)
     jobs = queue.Queue()
-    latest = {"objects": []}
+    latest = {"scene": ([], 0.)}
     stop = threading.Event()
 
     def listen():
@@ -183,7 +187,7 @@ def main(conn):
                 stop.set()
                 return
             if kind == "sync":              # keep only the newest scene, drop the backlog
-                latest["objects"] = arg
+                latest["scene"] = arg
             else:
                 jobs.put((kind, arg))
 
@@ -194,14 +198,22 @@ def main(conn):
                                cameraUpVector=[0, 0, 1])
     proj = p.computeProjectionMatrixFOV(fov=46, aspect=VIEW_W / VIEW_H,
                                         nearVal=0.01, farVal=3.0)
-    held = None
-    status = "IDLE - waiting for a command"
+    sim.go_to(12, 0, 8)  # one-time startup pose, before feedback is enabled
+    picker = ServoPick(sim)
+    last_scene = None
     next_render = 0.0
     frames = 0
     fps_t = time.perf_counter()
     fps = 0.0
 
-    while not stop.is_set():
+    try:
+      while not stop.is_set():
+        tick_start = time.perf_counter()
+        snapshot = latest['scene']
+        objects, observed_at = snapshot
+        if snapshot is not last_scene:
+            sim.sync_objects(objects, skip=picker.held)
+            last_scene = snapshot
         while True:
             try:
                 kind, arg = jobs.get_nowait()
@@ -211,53 +223,50 @@ def main(conn):
                 if kind == "workspace":
                     sim.set_workspace(*arg)
                 elif kind == "reset":
-                    sim.release()
-                    held = None
-                    status = "IDLE - waiting for a command"
+                    picker.cancel('Looking at the table')
                     sim.sync_objects([])
                     sim.set_workspace(*arg)
-                    latest["objects"] = []
+                    latest["scene"] = ([], 0.)
+                    objects, observed_at = [], 0.
                 elif kind == "release":
-                    sim.release()
-                    held = None
-                    status = "RELEASED - waiting for a command"
-                    conn.send(("held", None))
+                    picker.cancel()
                 elif kind == "pick":
                     x, y, z, tid = arg
-                    name = (sim.objects.get(tid) or {}).get("label", f"#{tid}")
-                    conn.send(("busy", True))
-                    status = f"APPROACHING {name}"
-                    sim.go_to(x, y, z + 5.0, settle_steps=130)   # approach from above
-                    status = f"DESCENDING ONTO {name}"
-                    sim.go_to(x, y, z, settle_steps=130)
-                    ok = sim.grasp(tid)
-                    if ok:
-                        held = tid
-                        status = f"LIFTING {name}"
-                        sim.go_to(x, y, z + LIFT_CM, settle_steps=180)
-                        status = f"HOLDING {name}"
-                    else:
-                        status = f"COULD NOT GRIP {name}"
-                    conn.send(("picked", (ok, tid if ok else None)))
-                    conn.send(("busy", False))
+                    # x/y are the initial selection only. Each subsequent tick
+                    # observes the selected body's RGB marker, so motion matters.
+                    picker.start(tid, z, time.perf_counter())
                 elif kind == "quit":
                     stop.set()
             except Exception as exc:
+                picker.cancel('Stopped after a simulation error')
                 conn.send(("error", f"{type(exc).__name__}: {exc}"))
-                conn.send(("busy", False))
 
-        sim.sync_objects(latest["objects"], skip=held)
-        p.stepSimulation()
+        if stop.is_set(): break
+        was_busy = picker.busy
+        try:
+            picker.tick(time.perf_counter(), {o['track_id'] for o in objects}, observed_at)
+        except Exception as exc:
+            picker.fail(f'Stopped: feedback error ({type(exc).__name__}: {exc})')
+        for event in picker.events: conn.send(event)
+        picker.events.clear()
+        conn.send(('status', picker.status))
+        for _ in range(16): p.stepSimulation()  # 240 Hz simulated physics / 15 Hz control
 
         now = time.perf_counter()
         if now >= next_render:
             next_render = now + 1.0 / SIM_FPS
-            img = p.getCameraImage(VIEW_W, VIEW_H, view, proj,
+            if was_busy and picker.camera.rgb is not None:
+                # Reuse the actual feedback RGB frame; never render twice per tick.
+                out = cv2.cvtColor(picker.camera.rgb, cv2.COLOR_RGB2BGR)
+                overlay_mvp = _mvp(picker.camera.view, picker.camera.proj)
+            else:
+                img = p.getCameraImage(VIEW_W, VIEW_H, view, proj,
                                    renderer=p.ER_TINY_RENDERER,
                                    shadow=1, lightDirection=LIGHT_DIR)
-            rgba = np.reshape(img[2], (VIEW_H, VIEW_W, 4)).astype(np.uint8)
-            out = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-            _draw_overlay(out, sim, held, status, _mvp(view, proj),
+                rgba = np.reshape(img[2], (VIEW_H, VIEW_W, 4)).astype(np.uint8)
+                out = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+                overlay_mvp = _mvp(view, proj)
+            _draw_overlay(out, sim, picker.held, picker.status, overlay_mvp,
                           abs(L1 - L2), L1 + L2)
             frames += 1
             dt = now - fps_t
@@ -268,6 +277,11 @@ def main(conn):
                 conn.send(("frame", (buf.tobytes(), round(fps, 1))))
         # Windows' default timer granularity is ~15 ms, so a short sleep here would
         # overshoot the render deadline. Sleep only for the slack we actually have.
-        slack = next_render - time.perf_counter()
-        time.sleep(min(0.004, slack) if slack > 0 else 0)
-    conn.close()
+        slack = CONTROL_DT - (time.perf_counter() - tick_start)
+        stop.wait(max(0., slack))
+    except (EOFError, BrokenPipeError, OSError):
+        pass  # parent closed its pipe
+    finally:
+        stop.set()
+        sim.disconnect()
+        conn.close()

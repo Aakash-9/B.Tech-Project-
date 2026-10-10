@@ -81,6 +81,10 @@
 </header>
 
 <div id="err" class="errbox" style="display:none"></div>
+<div style="padding:12px 20px 0" aria-live="polite">
+  <strong id="action" style="font-size:20px">Looking at the table</strong>
+  <div id="feedback-note" class="sub" style="color:#8b9aa7"></div>
+</div>
 
 <div class="wrap">
   <div class="panel">
@@ -176,6 +180,8 @@ async function tick(){
   try{
     const s = await (await fetch("/api/state")).json();
     lastState = s;
+    $("action").textContent = s.status || "Looking at the table";
+    $("feedback-note").textContent = s.feedback || "";
     $("reach").textContent = `arm reach ${s.reach[0]}–${s.reach[1]} cm`;
     const f = s.fps || {};
     $("fps").textContent =

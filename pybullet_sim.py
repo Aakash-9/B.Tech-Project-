@@ -162,18 +162,28 @@ class ArmSim:
             if self.gui:
                 p.removeUserDebugItem(gone["text"])
 
-    def grasp(self, track_id):
+    def grasp(self, track_id, max_distance_cm=None):
         """Attach an object to the gripper with a fixed constraint (a standard PyBullet
         stand-in for closing fingers on it — the URDF's fingers are visual only)."""
         entry = self.objects.get(track_id)
         if entry is None:
             return False
-        self.release()
-        gp = p.getLinkState(self.robot, self.gripper_link, computeForwardKinematics=True)[4]
+        state = p.getLinkState(self.robot, self.gripper_link, computeForwardKinematics=True)
+        gp, gq = state[4], state[5]
         op, oq = p.getBasePositionAndOrientation(entry["body"])
+        if max_distance_cm is not None and math.dist(gp, op) * 100 > max_distance_cm:
+            return False
+        self.release()
+        # Both constraint frames must describe the SAME world pose. The old
+        # child offset had the opposite sign and jumped the body on attachment.
+        oi, qi = p.invertTransform(op, oq)
+        child_pos, child_orn = p.multiplyTransforms(oi, qi, gp, gq)
+        pi, pq = p.invertTransform(state[0], state[1])  # Bullet constraint frame is the CoM
+        parent_pos, parent_orn = p.multiplyTransforms(pi, pq, gp, gq)
         self.held = p.createConstraint(
             self.robot, self.gripper_link, entry["body"], -1, p.JOINT_FIXED,
-            [0, 0, 0], [0, 0, 0], [op[0] - gp[0], op[1] - gp[1], op[2] - gp[2]])
+            [0, 0, 0], parent_pos, child_pos,
+            parentFrameOrientation=parent_orn, childFrameOrientation=child_orn)
         return True
 
     def release(self):

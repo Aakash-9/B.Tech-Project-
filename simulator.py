@@ -332,7 +332,10 @@ class Scene:
         boxes = type("B", (), {
             "cls": _Vals(list(range(n))),
             "conf": _Vals([0.95] * n),
-            "id": _Ids(list(range(1, n + 1))) if track_ids else None,
+            # Names are unique in the synthetic scene; visibility/depth ordering
+            # can change each frame, so visible-list position is NOT an identity.
+            "id": _Ids([next(i + 1 for i, box in enumerate(self.boxes) if box.name == name)
+                         for name, _ in sils]) if track_ids else None,
         })()
         return type("R", (), {
             "names": names,

@@ -54,11 +54,12 @@ class Engine:
     def __init__(self, source="sim", cam_index=0):
         self.grab_lock = threading.Lock()      # held by the capture loop
         self.proc_lock = threading.Lock()      # held by the perception loop
+        self.stopped = threading.Event()
         self.source = make_source(source, cam_index)
-        self.sim = SimProxy(on_event=self._on_sim_event)   # PyBullet, in its own process
         self._pending_grasp_at = None
 
         self.frame = None
+        self._capture = None  # atomic (frame, capture timestamp) publication
         self.objects = []
         self.grasp_at = None                   # where the held object was when we gripped it
         self.switching = False
@@ -66,6 +67,7 @@ class Engine:
         self.log = []
         self.camera_jpeg = None
         self.cam_rate, self.det_rate = _Rate(), _Rate()
+        self.sim = SimProxy(on_event=self._on_sim_event)   # PyBullet, in its own process
 
         self.sim.workspace(self.source.workspace_cm())
         self._say(f"{self.source.name} started. {self.source.calibration_status()['text']}")
@@ -89,6 +91,7 @@ class Engine:
             with self.grab_lock, self.proc_lock:
                 old, self.source = self.source, new
                 self.frame, self.objects = None, []
+                self._capture = None
                 self._reject_seen.clear()
                 old.close()
             self.sim.reset(new.workspace_cm())
@@ -151,7 +154,7 @@ class Engine:
 
     def capture_loop(self):
         """Camera rate. Never waits for the detector — that is the whole point."""
-        while True:
+        while not self.stopped.is_set():
             if self.switching:
                 time.sleep(0.05)
                 continue
@@ -161,6 +164,7 @@ class Engine:
                 time.sleep(0.02)
                 continue
             self.frame = frame
+            self._capture = (frame, time.perf_counter())
             img = self.annotate(frame, self.objects)       # newest frame, latest detections
             ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
@@ -169,23 +173,28 @@ class Engine:
 
     def perceive_loop(self):
         """Detector rate. Publishes objects to the UI and the simulation; blocks nothing."""
-        while True:
-            frame = self.frame
-            if self.switching or frame is None:
+        previous = None
+        while not self.stopped.is_set():
+            snapshot = self._capture
+            if self.switching or snapshot is None or snapshot is previous:
                 time.sleep(0.02)
                 continue
             with self.proc_lock:
+                if self.switching or self._capture is None: continue
+                frame, observed_at = snapshot
                 try:
                     objs = self.source.process(frame)
                 except Exception as exc:
                     self._say(f"Perception error: {exc}")
                     time.sleep(0.2)
                     continue
+                previous = snapshot
                 rejected = list(getattr(self.source, "rejected", []))
                 notes = list(getattr(self.source, "notes", []))
             self.objects = objs
-            if not self.busy:            # do not move the scene under a moving arm
-                self.sim.sync(objs)
+            # Feedback needs new target observations DURING motion. The worker
+            # protects only a body actually attached to the gripper.
+            self.sim.sync(objs, observed_at)
             self._check_grasp(objs)
             for name, why in rejected:
                 key = (name, why.split()[0])
@@ -220,8 +229,15 @@ class Engine:
             return
 
     def run_forever(self):
-        threading.Thread(target=self.perceive_loop, daemon=True).start()
+        self._perception_thread = threading.Thread(target=self.perceive_loop, daemon=True)
+        self._perception_thread.start()
         self.capture_loop()
+
+    def close(self):
+        self.stopped.set()
+        with self.grab_lock, self.proc_lock:
+            self.source.close()
+        self.sim.close()
 
     def step(self):
         """One synchronous pass — for tests and scripts, not the dashboard."""
@@ -275,6 +291,8 @@ class Engine:
             rows.append(row)
 
         return {"objects": rows, "log": self.log[-12:], "busy": self.busy,
+                "status": self.sim.status,
+                "feedback": "Rendered simulation RGB; object height remains an input assumption",
                 "switching": self.switching,
                 "is_live": self.source.name == "Live camera",
                 "holding": self.held is not None,

@@ -88,4 +88,7 @@ if __name__ == "__main__":
     engine = Engine(source="camera" if args.camera else "sim", cam_index=args.cam_index)
     threading.Thread(target=engine.run_forever, daemon=True).start()
     print(f"\n  {engine.source.name}  ->  http://127.0.0.1:{args.port}\n")
-    app.run(host="127.0.0.1", port=args.port, threaded=True, debug=False)
+    try:
+        app.run(host="127.0.0.1", port=args.port, threaded=True, debug=False)
+    finally:
+        engine.close()

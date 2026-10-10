@@ -27,3 +27,6 @@ arm_preview.png
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Reproducible audit logs, trial CSVs, convergence plots and captured frames.
+audit_results/

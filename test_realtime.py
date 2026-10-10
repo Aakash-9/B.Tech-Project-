@@ -87,7 +87,7 @@ def main():
           f"{cam:.0f} vs {det:.1f}")
     check("the slow source really was being called", e.source.calls >= 10,
           f"{e.source.calls} calls")
-    e.sim.close()
+    e.close()
 
     print("\n--- the simulation runs in its own process and keeps drawing ---")
     e = Engine(source="sim")
@@ -103,7 +103,8 @@ def main():
     print("\n--- a grasp survives a stationary object ---")
     e.command("pick the red cube")
     got = wait_for(lambda: e.held is not None and not e.busy, 45)
-    check("the red cube was picked up", got, f"held={e.held}")
+    check("the red cube was picked up", got,
+          f"held={e.held}; status={e.sim.status}; log={[l['text'] for l in e.log][-3:]}")
     if got:
         held_id = e.held
         time.sleep(5)
@@ -118,7 +119,7 @@ def main():
               f"held={e.held}")
         check("and it said why", any("not in the gripper" in l["text"] for l in e.log),
               [l["text"] for l in e.log][-1])
-    e.sim.close()
+    e.close()
 
     print("\n" + "=" * 58)
     print(f"PASSED {passed} / {passed + failed}")

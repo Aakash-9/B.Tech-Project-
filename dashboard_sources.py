@@ -9,6 +9,7 @@ reports detector confidence and calibration status instead, and never invents a 
 column it has no way to fill.
 """
 import os
+import time
 
 import cv2
 import numpy as np
@@ -53,6 +54,10 @@ FALLBACK_HEIGHT_CM = 3.0
 DEFAULT_WORKSPACE_CM = (42.0, 30.0)
 
 
+class _SimFrame(np.ndarray):
+    """Own the synthetic detections with the RGB frame, across the two threads."""
+
+
 class SimSource:
     """A synthetic scene. Knows ground truth, so accuracy is verifiable."""
 
@@ -70,7 +75,7 @@ class SimSource:
         self.rejected = []
         self.tilt_deg = camera_tilt_deg(self.H0, self.D, frame.shape)
         self.t = 0.0
-        self._result = self.scene.detection_result()
+        self._started = time.perf_counter()
 
     def calibration_status(self):
         L, W = area_size(self.centres)
@@ -80,13 +85,19 @@ class SimSource:
 
     def grab(self):
         """Cheap: advance the scene and render it. No measurement."""
-        self.t += SCENE_SPEED
+        # Baseline rendered ~57 fps, making a 0.30-second increment per frame
+        # run motion ~17x too fast. Scene motion must depend on elapsed time.
+        self.t = (time.perf_counter() - self._started) * SCENE_SPEED
         self.scene.advance(self.t)
-        self._result = self.scene.detection_result()   # snapshot, so process() stays in sync
-        return self.scene.render()
+        return self._snapshot()
+
+    def _snapshot(self):
+        frame = self.scene.render().view(_SimFrame)
+        frame.detections = self.scene.detection_result()
+        return frame
 
     def process(self, frame):
-        _, objs = measure_scene(self._result, self.H0, self.W0, self.D,
+        _, objs = measure_scene(frame.detections, self.H0, self.W0, self.D,
                                 max_footprint_cm2=1e9)
         for o in objs:
             o["colour_bgr"], o["colour_name"] = sample_colour(frame, o["mask_px"])
@@ -95,7 +106,7 @@ class SimSource:
         return self.trailer.stabilize_sizes(objs)
 
     def read(self, frozen=False):
-        frame = self.scene.render() if frozen else self.grab()
+        frame = self._snapshot() if frozen else self.grab()
         return frame, self.process(frame)
 
     def workspace_cm(self):

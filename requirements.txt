@@ -2,3 +2,8 @@ ultralytics
 opencv-python
 numpy
 matplotlib
+flask
+pybullet
+lap
+# YOLOE text encoder; the PyPI package named 'clip' is a different project.
+git+https://github.com/ultralytics/CLIP.git
