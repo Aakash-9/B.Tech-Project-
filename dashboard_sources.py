@@ -195,7 +195,7 @@ class CameraSource:
         # Stabilised BEFORE the height-hint loop, not after: the hint lookup keys off the
         # label, so a track that flickers "cup"/"bottle" between frames should get the
         # bottle's hint consistently, not whichever one won this one frame's coin flip.
-        objs = self.trailer.stabilize_labels(objs)
+        objs = self.trailer.stabilize_identity(objs)
         self.notes = []
         for o in objs:                       # a told height beats a default known to be wrong
             hint = HEIGHT_HINTS_CM.get(o["label"])

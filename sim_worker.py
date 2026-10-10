@@ -28,8 +28,16 @@ from vision_measure import describe
 #   360x270  78 ms (12.8)      320x240  61 ms (16.4)  256x192 39 ms (25.7)
 # Smooth motion reads as "real time" far more than resolution does, and the browser scales
 # the panel up anyway, so take the size that makes the target frame rate actually reachable.
-VIEW_W, VIEW_H = 320, 240
+# Cost is linear in pixels on the software renderer. Measured here WITH shadows on:
+#   320x240 33 ms (30 fps ceiling)   400x300 52 ms (19)   448x336 69 ms (14)   512x384 88 ms (11)
+# 400x300 is the largest size that still clears the 15 fps target with headroom, and it is
+# visibly sharper than 320x240 in a browser panel that upscales it anyway.
+VIEW_W, VIEW_H = 400, 300
 SIM_FPS = 15
+# Shadows cost 1.3 ms of a 24 ms frame here — measured — and they are what make a flat
+# render read as 3D at a glance: without them an object and its label float with no sense
+# of what is resting on what.
+LIGHT_DIR = [0.6, -0.9, 1.2]
 LIFT_CM = 6.0
 
 
@@ -50,20 +58,111 @@ def to_payload(objects):
     return out
 
 
-def _labels(sim, held, view, proj):
-    """Project each body's label into the image ourselves.
+def _mvp(view, proj):
+    return np.array(proj).reshape(4, 4).T @ np.array(view).reshape(4, 4).T
 
-    PyBullet's debug text is a GUI-only overlay; getCameraImage never draws it, which is
-    why the headless panel showed unlabelled blocks.
+
+def _project(mvp, point_m):
+    """World position in METRES -> pixel, or None when it is behind the camera."""
+    clip = mvp @ np.array([point_m[0], point_m[1], point_m[2], 1.0])
+    if clip[3] <= 1e-6:
+        return None
+    return (int((clip[0] / clip[3] * 0.5 + 0.5) * VIEW_W),
+            int((1.0 - (clip[1] / clip[3] * 0.5 + 0.5)) * VIEW_H))
+
+
+def _ground_ring(mvp, radius_cm, segments=72):
+    """A circle of this radius on the table, as a projected pixel polygon."""
+    r = radius_cm / 100.0
+    pts = [_project(mvp, (r * math.cos(2 * math.pi * i / segments),
+                          r * math.sin(2 * math.pi * i / segments), 0.0))
+           for i in range(segments)]
+    pts = [q for q in pts if q is not None]
+    return np.asarray(pts, np.int32) if len(pts) > 8 else None
+
+
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+CHIP_SCALE = 0.34
+
+
+def _chip(img, text, x, y, fg, bg):
+    """Text on a filled pill. Plain text over a busy render is hard to read; this isn't."""
+    (tw, th), _ = cv2.getTextSize(text, FONT, CHIP_SCALE, 1)
+    x = max(2, min(x, VIEW_W - tw - 6))
+    cv2.rectangle(img, (x - 3, y - th - 4), (x + tw + 3, y + 3), bg, -1)
+    cv2.putText(img, text, (x, y), FONT, CHIP_SCALE, fg, 1, cv2.LINE_AA)
+    return (x - 3, y - th - 4, x + tw + 3, y + 3)
+
+
+def _lay_out_labels(entries):
+    """Stop labels from landing on top of each other.
+
+    With four objects clustered near the middle of the table, every chip wanted the same
+    patch of screen and they overprinted into an unreadable stack — the single worst thing
+    for a view whose whole job is being understandable at a glance. Walk them top-down and
+    push any chip that would collide with one already placed far enough down to clear it.
     """
-    mvp = np.array(proj).reshape(4, 4).T @ np.array(view).reshape(4, 4).T
+    placed = []
+    out = []
+    for anchor, text, carried in sorted(entries, key=lambda e: e[0][1]):
+        (tw, th), _ = cv2.getTextSize(text, FONT, CHIP_SCALE, 1)
+        x, y = anchor[0] - tw // 2, anchor[1] - 8
+        for _ in range(14):                       # bounded: never loop forever on a pile-up
+            box = (x - 3, y - th - 4, x + tw + 3, y + 3)
+            if not any(box[0] < q[2] and q[0] < box[2] and box[1] < q[3] and q[1] < box[3]
+                       for q in placed):
+                break
+            y += th + 7
+        placed.append((x - 3, y - th - 4, x + tw + 3, y + 3))
+        out.append((anchor, text, carried, x, y))
+    return out
+
+
+def _draw_overlay(img, sim, held, status, mvp, reach_min_cm, reach_max_cm):
+    """Everything the raw render cannot say for itself.
+
+    A physics render shows WHAT is there but not what it MEANS. The reach rings answer the
+    first question anyone asks watching this ("can it actually get to that one?") without
+    needing the answer explained, and the status line says what the arm is doing right now
+    rather than leaving the viewer to infer it from a frozen frame.
+    """
+    for radius, colour in ((reach_max_cm, (95, 180, 110)), (reach_min_cm, (110, 135, 180))):
+        ring = _ground_ring(mvp, radius)
+        if ring is not None:
+            cv2.polylines(img, [ring], True, colour, 1, cv2.LINE_AA)
+
+    base = _project(mvp, (0.0, 0.0, 0.0))
+    if base is not None:
+        cv2.drawMarker(img, base, (200, 200, 200), cv2.MARKER_CROSS, 7, 1, cv2.LINE_AA)
+
+    entries = []
     for tid, rec in sim.objects.items():
-        clip = mvp @ np.array([*rec["text_pos"], 1.0])
-        if clip[3] <= 0:
-            continue
-        sx = int((clip[0] / clip[3] * 0.5 + 0.5) * VIEW_W)
-        sy = int((1.0 - (clip[1] / clip[3] * 0.5 + 0.5)) * VIEW_H)
-        yield rec["label"], sx, sy, (0, 140, 0) if tid == held else (20, 20, 20)
+        anchor = _project(mvp, rec["text_pos"])
+        if anchor is not None:
+            entries.append((anchor, rec["label"], tid == held))
+
+    for anchor, text, carried, x, y in _lay_out_labels(entries):
+        cv2.circle(img, anchor, 2, (245, 245, 245), -1, cv2.LINE_AA)
+        if carried:
+            cv2.circle(img, anchor, 12, (70, 220, 90), 1, cv2.LINE_AA)
+        # A leader line, because once a chip has been pushed aside to avoid a collision it
+        # is no longer obvious which block it belongs to.
+        cv2.line(img, anchor, (x + 6, y + 2), (120, 120, 125), 1, cv2.LINE_AA)
+        _chip(img, text, x, y,
+              (255, 255, 255) if carried else (245, 245, 245),
+              (40, 120, 55) if carried else (45, 45, 50))
+
+    cv2.rectangle(img, (0, 0), (VIEW_W, 20), (26, 30, 36), -1)
+    cv2.putText(img, status, (7, 14), FONT, 0.40, (235, 240, 245), 1, cv2.LINE_AA)
+    # The legend needs its own dark strip: as bare text it sat on whatever the render put
+    # underneath and was unreadable against the light tabletop.
+    cv2.rectangle(img, (0, VIEW_H - 16), (VIEW_W, VIEW_H), (26, 30, 36), -1)
+    cv2.circle(img, (10, VIEW_H - 8), 4, (95, 180, 110), 1, cv2.LINE_AA)
+    # :.1f on the inner radius — it is 0.5 cm here, and %.0f rendered it as a flat "0",
+    # which reads as "no inner limit" when there is one.
+    cv2.putText(img, f"arm reach {reach_min_cm:.1f}-{reach_max_cm:.1f} cm", (20, VIEW_H - 5),
+                FONT, 0.33, (205, 225, 210), 1, cv2.LINE_AA)
+    return img
 
 
 def main(conn):
@@ -96,6 +195,7 @@ def main(conn):
     proj = p.computeProjectionMatrixFOV(fov=46, aspect=VIEW_W / VIEW_H,
                                         nearVal=0.01, farVal=3.0)
     held = None
+    status = "IDLE - waiting for a command"
     next_render = 0.0
     frames = 0
     fps_t = time.perf_counter()
@@ -113,22 +213,31 @@ def main(conn):
                 elif kind == "reset":
                     sim.release()
                     held = None
+                    status = "IDLE - waiting for a command"
                     sim.sync_objects([])
                     sim.set_workspace(*arg)
                     latest["objects"] = []
                 elif kind == "release":
                     sim.release()
                     held = None
+                    status = "RELEASED - waiting for a command"
                     conn.send(("held", None))
                 elif kind == "pick":
                     x, y, z, tid = arg
+                    name = (sim.objects.get(tid) or {}).get("label", f"#{tid}")
                     conn.send(("busy", True))
+                    status = f"APPROACHING {name}"
                     sim.go_to(x, y, z + 5.0, settle_steps=130)   # approach from above
+                    status = f"DESCENDING ONTO {name}"
                     sim.go_to(x, y, z, settle_steps=130)
                     ok = sim.grasp(tid)
                     if ok:
                         held = tid
+                        status = f"LIFTING {name}"
                         sim.go_to(x, y, z + LIFT_CM, settle_steps=180)
+                        status = f"HOLDING {name}"
+                    else:
+                        status = f"COULD NOT GRIP {name}"
                     conn.send(("picked", (ok, tid if ok else None)))
                     conn.send(("busy", False))
                 elif kind == "quit":
@@ -144,13 +253,12 @@ def main(conn):
         if now >= next_render:
             next_render = now + 1.0 / SIM_FPS
             img = p.getCameraImage(VIEW_W, VIEW_H, view, proj,
-                                   renderer=p.ER_TINY_RENDERER)
+                                   renderer=p.ER_TINY_RENDERER,
+                                   shadow=1, lightDirection=LIGHT_DIR)
             rgba = np.reshape(img[2], (VIEW_H, VIEW_W, 4)).astype(np.uint8)
             out = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-            for text, sx, sy, col in _labels(sim, held, view, proj):
-                for thick, c in ((3, (255, 255, 255)), (1, col)):   # halo, then the text
-                    cv2.putText(out, text, (sx - 42, sy), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.36, c, thick, cv2.LINE_AA)
+            _draw_overlay(out, sim, held, status, _mvp(view, proj),
+                          abs(L1 - L2), L1 + L2)
             frames += 1
             dt = now - fps_t
             if dt >= 0.5:

@@ -45,6 +45,7 @@ class TrailTracker:
         self.heights = defaultdict(lambda: deque(maxlen=height_samples))
         self.sizes = defaultdict(lambda: deque(maxlen=size_samples))
         self.labels = defaultdict(lambda: deque(maxlen=label_votes))
+        self.colours = defaultdict(lambda: deque(maxlen=label_votes))
         self.missed = defaultdict(int)
         self.locked_id = None
 
@@ -60,6 +61,8 @@ class TrailTracker:
                 self.heights[tid].append(float(o["height_cm"]))
             if o.get("label"):
                 self.labels[tid].append(o["label"])
+            if o.get("colour_name"):
+                self.colours[tid].append(o["colour_name"])
             self.missed[tid] = 0
             seen.add(tid)
         for tid in list(self.trails):
@@ -73,6 +76,7 @@ class TrailTracker:
                 self.heights.pop(tid, None)
                 self.sizes.pop(tid, None)
                 self.labels.pop(tid, None)
+                self.colours.pop(tid, None)
                 if tid == self.locked_id:
                     self.locked_id = None    # genuinely lost — release the lock
 
@@ -96,8 +100,8 @@ class TrailTracker:
                 o["height_from_memory"] = True
         return tracked_objects
 
-    def stabilize_labels(self, tracked_objects):
-        """Replace this frame's label with the majority vote of recent frames.
+    def stabilize_identity(self, tracked_objects):
+        """Replace this frame's label AND colour with the majority vote of recent frames.
 
         Called AFTER update() (so this frame's own vote already counts) and BEFORE
         anything keys off the label — a height hint, a colour default — so a track that
@@ -105,9 +109,18 @@ class TrailTracker:
         get the cup's height hint for that one frame.
         """
         for o in tracked_objects:
-            votes = self.labels.get(o.get("track_id"))
+            tid = o.get("track_id")
+            votes = self.labels.get(tid)
             if votes:
                 o["label"] = Counter(votes).most_common(1)[0][0]
+            # Colour needs the same treatment, for a reason worth stating: colour naming
+            # uses absolute brightness/saturation thresholds, so an object sitting NEAR a
+            # boundary flips every frame on nothing more than sensor noise. Measured on a
+            # real dark bottle: median value 46 against a black/grey cut-off of 55, so it
+            # alternated "black"/"grey" frame to frame while the object never moved.
+            hues = self.colours.get(tid)
+            if hues:
+                o["colour_name"] = Counter(hues).most_common(1)[0][0]
         return tracked_objects
 
     def stabilize_sizes(self, tracked_objects):
@@ -192,9 +205,20 @@ if __name__ == "__main__":
     for lbl in labels:
         objs = [{"center_cm": (0.0, 0.0), "track_id": 9, "label": lbl}]
         t3.update(objs)
-        t3.stabilize_labels(objs)
+        t3.stabilize_identity(objs)
         assert objs[0]["label"] == "bottle", \
             f"a single odd frame ({lbl!r}) should not flip the displayed label"
+
+    # Colour flicker: a dark object sitting right on the black/grey naming threshold
+    # alternates between the two on sensor noise alone. The vote must settle it.
+    t3b = TrailTracker()
+    for colour in ["black", "grey", "black", "black", "grey", "black", "black"]:
+        objs = [{"center_cm": (0.0, 0.0), "track_id": 11, "label": "bottle",
+                 "colour_name": colour}]
+        t3b.update(objs)
+        t3b.stabilize_identity(objs)
+        assert objs[0]["colour_name"] == "black", \
+            "the majority colour should hold steady while the raw reading flickers"
 
     # A track that GENUINELY changes identity (new object gets this ID after the old one
     # left) must not stay stuck parroting the old label forever — the vote has to catch up.
@@ -202,7 +226,7 @@ if __name__ == "__main__":
     for lbl in ["cup"] * 4 + ["bottle"] * 4:
         objs = [{"center_cm": (0.0, 0.0), "track_id": 5, "label": lbl}]
         t4.update(objs)
-        t4.stabilize_labels(objs)
+        t4.stabilize_identity(objs)
     assert objs[0]["label"] == "bottle", "a sustained label change must eventually win"
 
     # Size jitter: one wildly wrong frame among many consistent ones must not swing the
