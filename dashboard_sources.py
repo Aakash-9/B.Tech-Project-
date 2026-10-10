@@ -13,8 +13,8 @@ import os
 import cv2
 import numpy as np
 
-from aruco_workspace import (area_size, height_gradient, make_detector,
-                             workspace_from_corners, MARKER_CM)
+from aruco_workspace import (area_size, camera_tilt_deg, height_gradient, make_detector,
+                             tilt_advice, workspace_from_corners, MARKER_CM)
 from object_tracker import TrailTracker, TRACKER
 from sim_accuracy import calibrate_from_frame
 from simulator import Camera, cluttered_scene
@@ -68,13 +68,15 @@ class SimSource:
             raise RuntimeError("calibration failed on the simulated scene")
         self.trailer = TrailTracker()
         self.rejected = []
+        self.tilt_deg = camera_tilt_deg(self.H0, self.D, frame.shape)
         self.t = 0.0
         self._result = self.scene.detection_result()
 
     def calibration_status(self):
         L, W = area_size(self.centres)
         return {"ok": True,
-                "text": f"exact (synthetic camera) — workspace {L:.1f} x {W:.1f} cm"}
+                "text": f"exact (synthetic camera) — workspace {L:.1f} x {W:.1f} cm",
+                "tilt": self.tilt_deg, "tilt_note": tilt_advice(self.tilt_deg)}
 
     def grab(self):
         """Cheap: advance the scene and render it. No measurement."""
@@ -133,6 +135,7 @@ class CameraSource:
         self.H0 = self.W0 = self.D = self.centres = None
         self.rejected = []
         self.notes = []               # kept, but with something downgraded — not dropped
+        self.tilt_deg = None
         self.live_calib = False
         self.calib_note = "waiting for ArUco markers"
 
@@ -141,15 +144,19 @@ class CameraSource:
             if os.path.exists("plane_calib.npz"):
                 with np.load("plane_calib.npz") as c:
                     self.W0, self.D = c["W0"], c["D"]
+                ok, probe = self.cap.read()
+                if ok:
+                    self.tilt_deg = camera_tilt_deg(self.H0, self.D, probe.shape)
             self.calib_note = ("saved calibration file — sizes are only right if the "
                                "camera has not moved since it was made")
 
     def calibration_status(self):
+        base = {"tilt": self.tilt_deg, "tilt_note": tilt_advice(self.tilt_deg)}
         if self.live_calib and self.centres is not None:
             L, W = area_size(self.centres)
-            return {"ok": True,
+            return {"ok": True, **base,
                     "text": f"live ArUco — workspace measured {L:.1f} x {W:.1f} cm"}
-        return {"ok": False, "text": self.calib_note}
+        return {"ok": False, "text": self.calib_note, **base}
 
     def grab(self):
         """Just pull a frame. Runs on its own thread at camera rate (~30 fps)."""
@@ -165,6 +172,7 @@ class CameraSource:
             if Hn is not None:
                 self.H0, self.centres = Hn, cn
                 self.W0, self.D = height_gradient(self.H0, frame.shape)
+                self.tilt_deg = camera_tilt_deg(self.H0, self.D, frame.shape)
                 self.live_calib = True
                 cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 

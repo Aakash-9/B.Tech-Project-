@@ -73,6 +73,7 @@
   <span class="sub" id="reach"></span>
   <span class="badge" id="fps">…</span>
   <span class="badge" id="calib">…</span>
+  <span class="badge" id="tilt" style="display:none"></span>
   <span class="toggle">
     <button id="btn-sim" class="seg">Simulated scene</button>
     <button id="btn-cam" class="seg">Live camera</button>
@@ -196,6 +197,18 @@ async function tick(){
     const cb = $("calib");
     cb.textContent = "calibration: " + (cal.text || "unknown");
     cb.className = "badge " + (cal.ok ? "ok" : "warn");
+
+    // Camera tilt decides whether heights can be measured at all, and nobody can judge
+    // the angle by eye — so show the measured number and whether it's in the good band.
+    const tb = $("tilt");
+    if (cal.tilt_note){
+      tb.style.display = "";
+      tb.textContent = cal.tilt_note;
+      const good = cal.tilt >= 32 && cal.tilt <= 50;
+      tb.className = "badge " + (good ? "ok" : "warn");
+    } else {
+      tb.style.display = "none";
+    }
 
     const cols = ["#","Object","Colour","Shape","Measured L×W×H (cm)"]
       .concat(s.has_truth ? ["True L×W×H (cm)","Worst error"] : ["Confidence"])
