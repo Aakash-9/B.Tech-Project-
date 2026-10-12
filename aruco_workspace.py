@@ -174,17 +174,21 @@ GOOD_TILT_DEG = (32.0, 50.0)
 
 
 def camera_tilt_deg(H_img_to_world, D, image_shape):
-    """How far below horizontal the camera is pointing, in degrees, or None.
+    """Angle between the optical axis and the table's NORMAL, in degrees, or None.
 
-    Height estimation needs to see two clean vertical edges on an object, and whether it
-    can depends almost entirely on this one number — measured on the synthetic scene,
-    below 30 degrees the few heights it does return are wrong by up to 48 mm, while at
-    36-44 degrees the error collapses to 1-3 mm. That makes camera tilt the single most
-    important thing to get right when setting up, and it is not something anyone can judge
-    by eye. So measure it: the calibration already recovers r3, the table's normal
-    direction in camera coordinates, and the angle between that and the optical axis IS
-    the tilt. Accurate to about 2 degrees across 32-50 degrees, which is ample for telling
-    an operator "tilt the camera further down".
+    READ THE CONVENTION CAREFULLY — it was got wrong here once and the resulting
+    on-screen advice told operators to move the camera the wrong way:
+        0 deg   = camera looking straight DOWN at the table (overhead)
+        90 deg  = camera looking HORIZONTALLY across the table
+    So this is the angle away from overhead, NOT the angle below horizontal. Subtract
+    from 90 to get "degrees below horizontal", which is how a person pictures it.
+
+    Height estimation needs two clean vertical edges on an object, and whether it gets
+    them depends almost entirely on this number — measured on the synthetic scene, at
+    18-26 deg (near overhead) the few heights returned are wrong by up to 48 mm, while
+    at 36-44 deg the error collapses to 1-3 mm. Nobody can judge that angle by eye, so
+    measure it: the calibration already recovers r3, the table normal in camera
+    coordinates, and |r3[2]| is cos(angle). Accurate to ~1.3 deg across the usable band.
     """
     if D is None:
         return None
@@ -204,15 +208,24 @@ def camera_tilt_deg(H_img_to_world, D, image_shape):
 
 
 def tilt_advice(tilt_deg):
-    """One short line an operator can act on, or None when the tilt is unknown."""
+    """One short line an operator can act on, or None when the tilt is unknown.
+
+    Phrased in degrees BELOW HORIZONTAL, because that is the angle a person can actually
+    picture and act on; tilt_deg itself is measured from the table normal (see
+    camera_tilt_deg). An earlier version reported the raw angle with "below horizontal"
+    wording and a direction derived from it, which pointed operators the wrong way.
+    """
     if tilt_deg is None:
         return None
     lo, hi = GOOD_TILT_DEG
-    if tilt_deg < lo:
-        return f"camera {tilt_deg:.0f}deg - too shallow, tilt DOWN to ~40deg for heights"
-    if tilt_deg > hi:
-        return f"camera {tilt_deg:.0f}deg - too steep, raise it toward ~40deg"
-    return f"camera {tilt_deg:.0f}deg - good angle for height measurement"
+    below_horizon = 90.0 - tilt_deg
+    if tilt_deg < lo:                      # too close to straight down
+        return (f"camera {below_horizon:.0f}deg below horizontal - too overhead, "
+                f"raise its aim toward ~50deg for heights")
+    if tilt_deg > hi:                      # too close to looking across the table
+        return (f"camera {below_horizon:.0f}deg below horizontal - too flat, "
+                f"aim it further DOWN toward ~50deg for heights")
+    return f"camera {below_horizon:.0f}deg below horizontal - good angle for heights"
 
 
 def area_size(centres):

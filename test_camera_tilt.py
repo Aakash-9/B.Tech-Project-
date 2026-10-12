@@ -56,19 +56,31 @@ def main():
 
     print("\n--- not the complement (the arcsin/arccos trap) ---")
     est = estimate(25)
-    check("a shallow camera reads shallow, not steep", est is not None and est < 45,
+    check("a near-overhead camera reads near-overhead (small angle)",
+          est is not None and est < 45,
           f"25 deg -> {est:.1f} deg" if est else "no estimate")
     est = estimate(50)
-    check("a steep camera reads steep, not shallow", est is not None and est > 40,
+    check("a flatter camera reads flatter (large angle)", est is not None and est > 40,
           f"50 deg -> {est:.1f} deg" if est else "no estimate")
 
-    print("\n--- the advice points the right way ---")
+    # The direction of the advice is the part that was once WRONG: the angle is measured
+    # from the table normal (0 = overhead), but the message described it as "below
+    # horizontal" and derived the direction from that, so it told operators to move the
+    # camera the opposite way. These check the physical direction, not just the wording.
+    print("\n--- the advice points the operator the RIGHT way ---")
     lo, hi = GOOD_TILT_DEG
-    check("too shallow is called out", "DOWN" in (tilt_advice(lo - 12) or ""),
-          tilt_advice(lo - 12))
-    check("too steep is called out", "steep" in (tilt_advice(hi + 12) or ""),
-          tilt_advice(hi + 12))
+    too_overhead = tilt_advice(lo - 12) or ""
+    too_flat = tilt_advice(hi + 12) or ""
+    check("a too-OVERHEAD camera is never told to aim further down",
+          "DOWN" not in too_overhead.upper(), too_overhead)
+    check("a too-OVERHEAD camera is told it is too overhead",
+          "overhead" in too_overhead, too_overhead)
+    check("a too-FLAT camera IS told to aim further down",
+          "DOWN" in too_flat.upper(), too_flat)
     check("a good angle is confirmed", "good" in (tilt_advice((lo + hi) / 2) or ""),
+          tilt_advice((lo + hi) / 2))
+    check("the message is phrased below-horizontal, not raw normal angle",
+          "below horizontal" in (tilt_advice((lo + hi) / 2) or ""),
           tilt_advice((lo + hi) / 2))
     check("unknown tilt says nothing rather than guessing", tilt_advice(None) is None)
 
