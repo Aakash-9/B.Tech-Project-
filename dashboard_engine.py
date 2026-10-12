@@ -26,6 +26,7 @@ import time
 import cv2
 import numpy as np
 
+from arm_driver import reachable
 from dashboard_sources import make_source
 from ik_solver import L1, L2
 from sim_proxy import SimProxy
@@ -329,11 +330,15 @@ class Engine:
 
         x, y = target["center_cm"]
         z = target["height_cm"] / 2.0
-        d = math.hypot(x, y, z)
         self._say(f"'{text}' -> {describe(target)} at ({x:.1f}, {y:.1f}) cm  [{why}]")
-        if not (abs(L1 - L2) <= d <= L1 + L2):
-            self._say(f"Out of reach: {d:.1f} cm (arm reaches "
-                      f"{abs(L1 - L2):.1f}-{L1 + L2:.1f} cm).")
+        # Reachability is a JOINT question, not a distance one. Checking radius alone let
+        # the simulation accept targets behind the base: the links span them, but base yaw
+        # would need 153 degrees and a standard servo gives +/-90, so the sim quietly
+        # clamped and "succeeded" 117 mm away from the request. On hardware that is a servo
+        # against its end stop. arm_driver owns the real limits, so ask it.
+        ok, reason = reachable(x, y, z)
+        if not ok:
+            self._say(f"Cannot reach it — {reason}.")
             return
 
         # Posted, not executed: the arm moves in the simulation process and the outcome

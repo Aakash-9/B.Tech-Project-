@@ -7,6 +7,8 @@ With two-plane calibration (plane_calib.npz) the mapping is available at ANY hei
 object standing 3 cm tall is measured on ITS OWN plane instead of the table — removing the
 magnification error that otherwise inflates every measurement.
 """
+import math
+
 import cv2
 import numpy as np
 
@@ -271,6 +273,38 @@ def measure_objects(result, H, max_footprint_cm2=1000.0):
             out.append(m)
 
     return [o for o in out if o["area_cm2"] <= max_footprint_cm2]
+
+
+def _world_to_image(W, pts_xy, z_cm=0.0):
+    """Project world points (cm, on the plane z=z_cm) into the image using W(z)."""
+    pts = np.asarray(pts_xy, dtype=np.float64).reshape(-1, 2)
+    hom = (W @ np.column_stack([pts, np.ones(len(pts))]).T).T
+    depth = hom[:, 2:3]
+    depth = np.where(np.abs(depth) < 1e-12, 1e-12, depth)
+    return hom[:, :2] / depth
+
+
+def _silhouette_iou(poly_px_hull, obs_area, foot_world, W0, D, h_cm):
+    """How well does a box of height h_cm, on this footprint, explain the observed mask?
+
+    NOTE, so this is not re-attempted blindly: scoring a WHOLE silhouette this way cannot
+    by itself recover height. Recomputing the footprint at each trial height lets footprint
+    and height trade off exactly against each other, so the score sits at IoU 1.00 across
+    every height from 0.5 cm to the true value — a plateau, not a peak, and the search then
+    returns the bottom of the plateau. Measured on the synthetic scene: 100% coverage but
+    26 mm median error, against the corner-pair estimator's 60% coverage at 2.1 mm. Any
+    future attempt needs an h-INDEPENDENT anchor for the footprint (for example unprojecting
+    only the base-contact boundary at z=0), not a better search over the same parametrisation.
+    """
+    base = _world_to_image(W0, foot_world)
+    top = _world_to_image(W0 + h_cm * D, foot_world)
+    pred = cv2.convexHull(np.vstack([base, top]).astype(np.float32))
+    if len(pred) < 3:
+        return 0.0
+    inter, _ = cv2.intersectConvexConvex(pred, poly_px_hull)
+    pred_area = abs(cv2.contourArea(pred))
+    union = pred_area + obs_area - inter
+    return float(inter / union) if union > 1e-9 else 0.0
 
 
 def footprint_polygon(poly_px, H0, W0, D, h_cm):

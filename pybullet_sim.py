@@ -94,6 +94,36 @@ class ArmSim:
             p.stepSimulation()
         return (base, shoulder, elbow, wrist)
 
+    def drive_joint_angles(self, base_deg, shoulder_deg, elbow_deg, wrist_deg):
+        """Command joint angles directly, in ik_solver's degree convention.
+
+        go_to() above solves IK and then drives; this is the half after the solve, exposed
+        so arm_driver.SimDriver can offer exactly the same entry point a servo controller
+        offers. Keeping the two paths identical from this point down is what makes swapping
+        simulation for hardware a one-file change.
+        """
+        targets = angles_to_joint_targets(base_deg, shoulder_deg, elbow_deg, wrist_deg)
+        for name, angle in zip(JOINTS, targets):
+            p.setJointMotorControl2(self.robot, self.joint_index[name],
+                                    p.POSITION_CONTROL, targetPosition=angle,
+                                    force=40, positionGain=0.25, velocityGain=1.0)
+        return (base_deg, shoulder_deg, elbow_deg, wrist_deg)
+
+    def joint_angles_deg(self):
+        """Measured joint angles, back in ik_solver's convention.
+
+        The inverse of angles_to_joint_targets: the URDF carries elbow with a -180 offset,
+        so it has to be added back or the number returned is not the one that was asked for.
+        """
+        q = [p.getJointState(self.robot, self.joint_index[n])[0] for n in JOINTS]
+        base, shoulder, elbow, wrist = (math.degrees(a) for a in q)
+        return (base, shoulder, elbow + 180.0, wrist)
+
+    def step_for(self, seconds):
+        """Advance physics for a wall-clock duration at the simulator's 240 Hz timestep."""
+        for _ in range(max(0, int(round(float(seconds) * 240.0)))):
+            p.stepSimulation()
+
     def tip_position_cm(self):
         # getLinkState()[0] is the link's CENTER OF MASS (its inertial frame), which is
         # offset from the joint origin by that link's <inertial origin> — using it here
