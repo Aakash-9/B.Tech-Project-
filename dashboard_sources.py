@@ -16,6 +16,7 @@ import numpy as np
 
 from aruco_workspace import (area_size, camera_tilt_deg, height_gradient, make_detector,
                              tilt_advice, workspace_from_corners, MARKER_CM)
+from paper_calib import SHEET_CM, calibrate_from_sheet
 from object_tracker import TrailTracker, TRACKER
 from sim_accuracy import calibrate_from_frame
 from simulator import Camera, cluttered_scene
@@ -147,8 +148,10 @@ class CameraSource:
         self.rejected = []
         self.notes = []               # kept, but with something downgraded — not dropped
         self.tilt_deg = None
+        self.sheet_size_cm = None
         self.live_calib = False
-        self.calib_note = "waiting for ArUco markers"
+        self.calib_source = None      # 'aruco' | 'sheet' | 'file' — never left implicit
+        self.calib_note = "no calibration yet — show ArUco markers or a sheet of A4 paper"
 
         if os.path.exists("homography_matrix.npy"):
             self.H0 = np.load("homography_matrix.npy")
@@ -158,15 +161,29 @@ class CameraSource:
                 ok, probe = self.cap.read()
                 if ok:
                     self.tilt_deg = camera_tilt_deg(self.H0, self.D, probe.shape)
-            self.calib_note = ("saved calibration file — sizes are only right if the "
-                               "camera has not moved since it was made")
+            self.calib_source = "file"
+            self.calib_note = ("saved calibration FILE — every size and position below is "
+                               "wrong unless the camera is exactly where it was when this "
+                               "was saved. Put 4 ArUco markers or an A4 sheet in view.")
 
     def calibration_status(self):
-        base = {"tilt": self.tilt_deg, "tilt_note": tilt_advice(self.tilt_deg)}
-        if self.live_calib and self.centres is not None:
+        note = tilt_advice(self.tilt_deg)
+        # A tilt derived from a saved file describes where the camera WAS. Reporting that
+        # as if it were current is exactly how an operator ends up trusting a stale number:
+        # observed live, the badge read "54 deg - good angle" while the camera was in fact
+        # near-horizontal and every measurement was wrong.
+        if note and not self.live_calib:
+            note = f"{note} (from the saved file, NOT measured now)"
+        base = {"tilt": self.tilt_deg, "tilt_note": note,
+                "source": self.calib_source}
+        if self.live_calib and self.calib_source == "aruco" and self.centres is not None:
             L, W = area_size(self.centres)
             return {"ok": True, **base,
                     "text": f"live ArUco — workspace measured {L:.1f} x {W:.1f} cm"}
+        if self.live_calib and self.calib_source == "sheet":
+            w, h = self.sheet_size_cm or SHEET_CM
+            return {"ok": True, **base,
+                    "text": f"live paper sheet ({w:.1f} x {h:.1f} cm) — scale is metric"}
         return {"ok": False, "text": self.calib_note, **base}
 
     def grab(self):
@@ -174,9 +191,31 @@ class CameraSource:
         ok, frame = self.cap.read()
         return frame if ok else None
 
+    def _try_sheet(self, frame):
+        """Fall back to an ordinary A4 sheet when no markers are in view.
+
+        A sheet carries true metric scale (21.0 x 29.7 cm worldwide) and needs no printer,
+        which removes the last practical reason to run on a stale saved calibration. It
+        supplies the same four known-separation image points the markers do, so everything
+        downstream is unchanged.
+        """
+        H0, W0, D, corners, size_cm = calibrate_from_sheet(frame)
+        if H0 is None or D is None:
+            return False
+        self.H0, self.W0, self.D = H0, W0, D
+        self.centres = None            # a sheet defines scale, not the workspace outline
+        self.sheet_size_cm = size_cm
+        self.tilt_deg = camera_tilt_deg(H0, D, frame.shape)
+        self.live_calib = True
+        self.calib_source = "sheet"
+        cv2.polylines(frame, [np.round(corners).astype(np.int32)], True, (0, 220, 255), 2)
+        return True
+
     def process(self, frame):
         """Everything expensive. Runs on its own thread, as fast as it manages."""
         corners, ids, _ = self.aruco.detectMarkers(frame)
+        if (ids is None or len(ids) < 3) and self.calib_source != "aruco":
+            self._try_sheet(frame)     # markers always win; this only fills the gap
         if ids is not None and len(ids) >= 3:
             Hn, cn = workspace_from_corners(
                 [corners[i] for i in np.argsort(ids.flatten())], MARKER_CM)
@@ -185,6 +224,7 @@ class CameraSource:
                 self.W0, self.D = height_gradient(self.H0, frame.shape)
                 self.tilt_deg = camera_tilt_deg(self.H0, self.D, frame.shape)
                 self.live_calib = True
+                self.calib_source = "aruco"
                 cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
         if self.H0 is None:
