@@ -148,6 +148,26 @@
   #log::-webkit-scrollbar{width:9px}
   #log::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px}
 
+  /* ---------- click-to-calibrate ---------- */
+  .minibtn{margin-left:auto;background:#152231;color:var(--accent);
+    border:1px solid var(--line2);border-radius:7px;padding:4px 11px;font-size:11px;
+    font-weight:650;letter-spacing:.04em;text-transform:uppercase;cursor:pointer}
+  .minibtn:hover{background:rgba(56,189,248,.14)}
+  .minibtn.on{background:var(--accent);color:#04121f}
+  .camwrap{position:relative;line-height:0}
+  #calcanvas{position:absolute;inset:0;width:100%;height:100%;display:none;
+    cursor:crosshair}
+  .camwrap.calibrating #calcanvas{display:block}
+  .calhint{position:absolute;left:0;right:0;top:0;display:none;padding:9px 12px;
+    background:rgba(56,189,248,.92);color:#04121f;font-size:12.5px;font-weight:650;
+    line-height:1.4}
+  .camwrap.calibrating .calhint{display:block}
+  .calform{display:none;gap:9px;align-items:center;flex-wrap:wrap;padding:12px 15px;
+    border-top:1px solid var(--line);background:#0a1017;font-size:12.5px;color:var(--dim)}
+  .calform.show{display:flex}
+  .calform input{width:110px;min-width:0;padding:9px 11px;font-size:13.5px}
+  .calform button{padding:9px 16px;font-size:13px}
+
   .errbox{margin:14px 24px 0;padding:13px 16px;border-radius:11px;font-size:13px;
     background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.4);color:#fecaca}
   @media(max-width:520px){
@@ -203,8 +223,22 @@
 
 <div class="wrap">
   <div class="panel">
-    <h2 id="camtitle">Camera view — detected &amp; measured</h2>
-    <img id="camview" src="/video/camera" alt="camera view">
+    <h2 id="camtitle">Camera view — detected &amp; measured
+      <button id="btn-cal" class="minibtn">Calibrate</button>
+    </h2>
+    <div class="camwrap">
+      <img id="camview" src="/video/camera" alt="camera view">
+      <canvas id="calcanvas"></canvas>
+      <div id="calhint" class="calhint"></div>
+    </div>
+    <div id="calform" class="calform">
+      <span>Real size of that rectangle:</span>
+      <input type="number" id="cal-w" step="0.1" min="1" placeholder="width cm">
+      <span>×</span>
+      <input type="number" id="cal-h" step="0.1" min="1" placeholder="height cm">
+      <button id="cal-apply">Apply</button>
+      <button id="cal-cancel" class="ghost">Cancel</button>
+    </div>
   </div>
 
   <div class="panel">
@@ -439,6 +473,87 @@ function reviveStalledStreams(){
     $("simview").src = "/video/sim?r=" + now;
   }
 }
+
+// ---------- click-to-calibrate ----------
+// Four clicks on the camera panel plus the rectangle's real size is the most flexible way
+// to establish metric scale: it needs no printer, no marker detection that might refuse,
+// and unlike a found sheet it lets the operator CHOOSE the origin — which matters, because
+// everything downstream treats world (0,0) as the arm's base.
+const calPts = [];
+let calibrating = false;
+const camwrap = document.querySelector(".camwrap");
+const canvas = $("calcanvas");
+
+const CAL_STEPS = [
+  "Click corner 1 — nearest the TOP-LEFT of the picture",
+  "Click corner 2 — going CLOCKWISE",
+  "Click corner 3 — keep going clockwise",
+  "Click corner 4 — the last corner",
+  "Now type the rectangle's real width and height below, then Apply"
+];
+
+function drawCal(){
+  const img = $("camview");
+  canvas.width = img.clientWidth; canvas.height = img.clientHeight;
+  const g = canvas.getContext("2d");
+  g.clearRect(0,0,canvas.width,canvas.height);
+  if (!calPts.length) return;
+  g.strokeStyle = "#38bdf8"; g.lineWidth = 2; g.fillStyle = "rgba(56,189,248,.18)";
+  g.beginPath();
+  calPts.forEach((p,i) => i ? g.lineTo(p.vx,p.vy) : g.moveTo(p.vx,p.vy));
+  if (calPts.length === 4) { g.closePath(); g.fill(); }
+  g.stroke();
+  calPts.forEach((p,i) => {
+    g.fillStyle = "#38bdf8"; g.beginPath(); g.arc(p.vx,p.vy,6,0,7); g.fill();
+    g.fillStyle = "#04121f"; g.font = "bold 11px system-ui"; g.textAlign = "center";
+    g.fillText(String(i+1), p.vx, p.vy+4);
+  });
+}
+
+function setCalMode(on){
+  calibrating = on;
+  calPts.length = 0;
+  camwrap.classList.toggle("calibrating", on);
+  $("calform").classList.toggle("show", on);
+  $("btn-cal").classList.toggle("on", on);
+  $("btn-cal").textContent = on ? "Cancel" : "Calibrate";
+  $("calhint").textContent = CAL_STEPS[0];
+  drawCal();
+}
+
+$("btn-cal").onclick = () => setCalMode(!calibrating);
+$("cal-cancel").onclick = () => setCalMode(false);
+
+canvas.addEventListener("click", e => {
+  if (calPts.length >= 4) return;
+  const img = $("camview");
+  const r = canvas.getBoundingClientRect();
+  const vx = e.clientX - r.left, vy = e.clientY - r.top;
+  // The panel is scaled to fit the page; the homography needs native frame pixels.
+  const sx = (img.naturalWidth || r.width) / r.width;
+  const sy = (img.naturalHeight || r.height) / r.height;
+  calPts.push({vx, vy, x: vx * sx, y: vy * sy});
+  $("calhint").textContent = CAL_STEPS[Math.min(calPts.length, 4)];
+  drawCal();
+});
+
+$("cal-apply").onclick = async () => {
+  if (calPts.length !== 4) { $("calhint").textContent = "Click all four corners first"; return; }
+  const w = parseFloat($("cal-w").value), h = parseFloat($("cal-h").value);
+  if (!(w > 0) || !(h > 0)) { $("calhint").textContent = "Type the real width and height in cm"; return; }
+  try{
+    const res = await fetch("/api/calibrate", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({points: calPts.map(p => [p.x, p.y]), width_cm: w, height_cm: h})});
+    const out = await res.json();
+    if (!out.ok) throw new Error(out.error || "calibration refused");
+    setCalMode(false);
+  }catch(err){
+    $("calhint").textContent = "Could not calibrate: " + err.message;
+  }
+};
+
+window.addEventListener("resize", () => { if (calibrating) drawCal(); });
 
 tick(); setInterval(tick, 700);
 setInterval(reviveStalledStreams, 1500);

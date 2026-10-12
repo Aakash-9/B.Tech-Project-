@@ -69,6 +69,24 @@ def api_command():
     return jsonify({"ok": True})
 
 
+@app.route("/api/calibrate", methods=["POST"])
+def api_calibrate():
+    """Calibrate from four points the operator clicked on the camera panel.
+
+    Runs inline rather than on a worker thread: it is a single homography fit, the caller
+    needs the residual back to judge whether the click was any good, and a calibration that
+    silently succeeds or fails in the background is exactly the kind of thing that leaves
+    someone trusting wrong numbers.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        result = engine.calibrate_points(body.get("points"),
+                                         body.get("width_cm"), body.get("height_cm"))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/source", methods=["POST"])
 def api_source():
     """Switch between the simulated scene and the live webcam from the page itself."""

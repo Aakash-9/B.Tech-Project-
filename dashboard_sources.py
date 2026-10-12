@@ -149,6 +149,7 @@ class CameraSource:
         self.notes = []               # kept, but with something downgraded — not dropped
         self.tilt_deg = None
         self.sheet_size_cm = None
+        self.frame_shape = None
         self.live_calib = False
         self.calib_source = None      # 'aruco' | 'sheet' | 'file' — never left implicit
         self.calib_note = "no calibration yet — show ArUco markers or a sheet of A4 paper"
@@ -184,12 +185,85 @@ class CameraSource:
             w, h = self.sheet_size_cm or SHEET_CM
             return {"ok": True, **base,
                     "text": f"live paper sheet ({w:.1f} x {h:.1f} cm) — scale is metric"}
+        if self.live_calib and self.calib_source == "manual":
+            w, h = self.sheet_size_cm or (0.0, 0.0)
+            return {"ok": True, **base,
+                    "text": f"marked by hand ({w:.1f} x {h:.1f} cm rectangle) — scale is metric"}
         return {"ok": False, "text": self.calib_note, **base}
 
     def grab(self):
         """Just pull a frame. Runs on its own thread at camera rate (~30 fps)."""
         ok, frame = self.cap.read()
+        if ok:
+            self.frame_shape = frame.shape
         return frame if ok else None
+
+    def calibrate_from_points(self, points_px, width_cm, height_cm, save=True):
+        """Calibrate from four clicked image points bounding a rectangle of known size.
+
+        The most flexible way in: the operator marks any rectangle they can measure — the
+        edge of a book, tape on the table, the keyboard — and types its real width and
+        height. No printer, no sheet, no marker detection that might refuse. It is also the
+        only method that lets the operator choose WHERE the origin sits, which matters
+        because the rest of the system treats world (0, 0) as the arm's base: mark a
+        rectangle centred on where the arm will stand and the coordinates come out right.
+
+        Click order must be clockwise from the corner nearest the top-left of the picture;
+        the world points below are listed in that same order, and a mismatched order
+        produces a mirrored or sheared calibration that still "succeeds".
+        """
+        pts = np.asarray(points_px, dtype=np.float32).reshape(-1, 2)
+        if len(pts) != 4:
+            raise ValueError(f"need exactly 4 points, got {len(pts)}")
+        w, h = float(width_cm), float(height_cm)
+        if not (w > 0.5 and h > 0.5):
+            raise ValueError("width and height must be real positive centimetres")
+        # A homography through four points ALWAYS fits, so the corner residual cannot catch
+        # a mis-ordered click: measured, transposing two corners still fitted to 0.0 mm
+        # while silently mirroring every coordinate afterwards. The order has to be checked
+        # geometrically instead.
+        quad = pts.reshape(-1, 1, 2).astype(np.float32)
+        if not cv2.isContourConvex(quad):
+            raise ValueError("those corners cross over each other — click around the "
+                             "rectangle's edge in order, not diagonally across it")
+        x, y = pts[:, 0], pts[:, 1]
+        signed_area = 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+        # Image y runs downward, so a clockwise on-screen traversal gives a POSITIVE
+        # shoelace area. Anticlockwise fits just as perfectly and then mirrors the world
+        # frame — distances survive a reflection, positions do not, so the arm would be
+        # sent to the wrong side of the table with nothing visibly wrong.
+        if signed_area < 0:
+            raise ValueError("those corners go anticlockwise — start at the top-left "
+                             "corner and work CLOCKWISE around the rectangle")
+
+        # Listed in the SAME order the operator is told to click: top-left, then clockwise.
+        # For a camera looking down at a table, up-the-screen is away from the camera, so
+        # the first two corners are the far edge (+y) and the last two the near edge (-y).
+        world = np.array([[-w / 2, h / 2], [w / 2, h / 2],
+                          [w / 2, -h / 2], [-w / 2, -h / 2]], dtype=np.float32)
+        H0, _ = cv2.findHomography(pts, world)
+        if H0 is None:
+            raise ValueError("those four points do not form a usable rectangle")
+
+        frame = self.frame_shape or (480, 640, 3)
+        W0, D = height_gradient(H0, frame)
+        if D is None:
+            raise ValueError("could not derive the height mapping from these points")
+        self.H0, self.W0, self.D = H0, W0, D
+        self.centres = None
+        self.sheet_size_cm = (w, h)
+        self.tilt_deg = camera_tilt_deg(H0, D, frame)
+        self.live_calib = True
+        self.calib_source = "manual"
+        # Residual is the honest quality number: how far each clicked corner lands from
+        # where the stated rectangle says it should be.
+        got = cv2.perspectiveTransform(pts.reshape(-1, 1, 2), H0).reshape(-1, 2)
+        residual_cm = float(np.max(np.linalg.norm(got - world, axis=1)))
+        if save:
+            np.save("homography_matrix.npy", H0)
+            np.savez("plane_calib.npz", W0=W0, D=D)
+        return {"residual_mm": residual_cm * 10, "tilt_deg": self.tilt_deg,
+                "size_cm": (w, h)}
 
     def _try_sheet(self, frame):
         """Fall back to an ordinary A4 sheet when no markers are in view.
@@ -214,8 +288,11 @@ class CameraSource:
     def process(self, frame):
         """Everything expensive. Runs on its own thread, as fast as it manages."""
         corners, ids, _ = self.aruco.detectMarkers(frame)
-        if (ids is None or len(ids) < 3) and self.calib_source != "aruco":
-            self._try_sheet(frame)     # markers always win; this only fills the gap
+        if (ids is None or len(ids) < 3) and self.calib_source in (None, "file"):
+            # Markers always win. A sheet only fills a gap — it must never overwrite a
+            # calibration the operator made by hand, which is a deliberate act with a
+            # chosen origin, nor one already established from markers.
+            self._try_sheet(frame)
         if ids is not None and len(ids) >= 3:
             Hn, cn = workspace_from_corners(
                 [corners[i] for i in np.argsort(ids.flatten())], MARKER_CM)

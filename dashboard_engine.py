@@ -306,6 +306,20 @@ class Engine:
                 "calibration": self.source.calibration_status()}
 
     # ---------------------------------------------------------------- commands
+    def calibrate_points(self, points, width_cm, height_cm):
+        """Hand the four clicked points to the live source, and say what came of it."""
+        src = self.source
+        if not hasattr(src, "calibrate_from_points"):
+            raise RuntimeError("the simulated scene is already exactly calibrated — "
+                               "switch to Live camera to mark a rectangle")
+        with self.proc_lock:          # perception must not read H0 mid-swap
+            result = src.calibrate_from_points(points, width_cm, height_cm)
+        self._reject_seen.clear()     # old complaints were about the old scale
+        self._say(f"Calibrated by hand from a {result['size_cm'][0]:.1f} x "
+                  f"{result['size_cm'][1]:.1f} cm rectangle — corner fit "
+                  f"{result['residual_mm']:.1f} mm.")
+        return result
+
     def command(self, text):
         text = (text or "").strip()
         if not text:
